@@ -86,6 +86,10 @@ with st.sidebar:
     unit_fn = st.number_input("FN 1件あたり損失（負値で入力）",  value=-500_000, step=10_000)
     unit_tp = st.number_input("TP 1件あたり機会利得（円）",      value=50_000,   step=10_000)
     unit_fp = st.number_input("FP 1件あたり機会損失（負値で入力）", value=-80_000, step=10_000)
+    if unit_fn > 0:
+        st.warning("FNは貸し倒れ損失のため、通常は負値を入力します。")
+    if unit_fp > 0:
+        st.warning("FPは機会損失のため、通常は負値を入力します。")
 
 # ── 列確定前 ──────────────────────────────────────────────────────────
 if "col_confirmed" not in st.session_state:
@@ -111,7 +115,9 @@ except Exception as e:
 
 unique_vals = set(y_true.dropna().unique())
 if not unique_vals.issubset({0.0, 1.0}):
-    st.error(f"実績デフォルト列「{col_default}」に0/1以外の値が含まれています: {unique_vals}")
+    preview = sorted(unique_vals)[:5]
+    suffix = f"… 他{len(unique_vals)-5}種類" if len(unique_vals) > 5 else ""
+    st.error(f"実績デフォルト列「{col_default}」に0/1以外の値が含まれています: {preview}{suffix}")
     st.session_state["col_confirmed"] = False
     st.stop()
 
@@ -134,6 +140,17 @@ def calc_revenue(tp_, fp_, fn_, tn_):
     return tn_ * unit_tn + fn_ * unit_fn + tp_ * unit_tp + fp_ * unit_fp
 
 THRESHOLDS = np.linspace(0.01, 0.99, 200)
+
+@st.cache_data
+def scan_thresholds(pd_arr, y_arr, u_tn, u_fn, u_tp, u_fp):
+    """全閾値を一度だけ走査してDataFrameに集約する。単価が変わると自動再計算。"""
+    rows = []
+    for thr in THRESHOLDS:
+        tp_, fp_, fn_, tn_, prec_, rec_, ar_ = calc_metrics(thr, pd_arr, y_arr)
+        rev_ = tn_ * u_tn + fn_ * u_fn + tp_ * u_tp + fp_ * u_fp
+        rows.append(dict(thr=thr, tp=tp_, fp=fp_, fn=fn_, tn=tn_,
+                         precision=prec_, recall=rec_, ar=ar_, revenue=rev_))
+    return pd.DataFrame(rows)
 
 # ══════════════════════════════════════════════════════════════════════
 # タブ
@@ -230,6 +247,9 @@ with tab_main:
     pd_clean = pd_use[valid_mask].values
     y_clean  = y_true[valid_mask].values
 
+    # 閾値スキャン（キャッシュ済み）
+    scan = scan_thresholds(pd_clean, y_clean, unit_tn, unit_fn, unit_tp, unit_fp)
+
     if st.session_state["adjusted"]:
         st.success("以降の分析はすべて **年率調整済みPD** を使用しています。")
     else:
@@ -253,8 +273,7 @@ with tab_main:
         st.caption("※ 同一PDスコアが多数の場合、実際の承認率が目標値と微小にズレることがあります。")
     else:
         st.info("収益単価（サイドバー）をもとに最大利益Thresholdを自動算出します。")
-        _revs = [calc_revenue(*calc_metrics(t, pd_clean, y_clean)[:4]) for t in THRESHOLDS]
-        pd_threshold = float(THRESHOLDS[int(np.argmax(_revs))])
+        pd_threshold = float(scan.loc[scan["revenue"].idxmax(), "thr"])
         st.success(f"最大利益Threshold: **{pd_threshold:.3f}**")
 
     tp, fp, fn, tn, precision, recall, approval_rate = calc_metrics(pd_threshold, pd_clean, y_clean)
@@ -340,12 +359,13 @@ with tab_main:
 
     # 7. 最大利益Threshold
     st.header("7. 最大利益Threshold")
-    revenues = np.array([calc_revenue(*calc_metrics(t, pd_clean, y_clean)[:4]) for t in THRESHOLDS])
-    best_idx = np.argmax(revenues); best_thr = THRESHOLDS[best_idx]; best_rev = revenues[best_idx]
+    best_idx = scan["revenue"].idxmax()
+    best_thr = float(scan.loc[best_idx, "thr"])
+    best_rev = float(scan.loc[best_idx, "revenue"])
     st.columns(2)[0].metric("最大利益", f"¥{best_rev:,.0f}")
     st.columns(2)[1].metric("最適Threshold", f"{best_thr:.3f}")
     fig5, ax5 = plt.subplots(figsize=(9, 4))
-    ax5.plot(THRESHOLDS, revenues / 1e6, color="#4C72B0", linewidth=2)
+    ax5.plot(scan["thr"], scan["revenue"] / 1e6, color="#4C72B0", linewidth=2)
     ax5.axvline(best_thr, color="#C44E52", linestyle="--", linewidth=1.5, label=f"Optimal: {best_thr:.3f}")
     ax5.axvline(pd_threshold, color="#55A868", linestyle=":", linewidth=1.5, label=f"Current: {pd_threshold:.3f}")
     ax5.scatter([best_thr], [best_rev / 1e6], color="#C44E52", zorder=5, s=60)
@@ -355,8 +375,8 @@ with tab_main:
 
     # 8. 承認率 vs 利益
     st.header("8. 承認率 vs 利益 トレードオフ")
-    ar_curve = np.array([calc_metrics(t, pd_clean, y_clean)[6] for t in THRESHOLDS])
-    rv_curve = np.array([calc_revenue(*calc_metrics(t, pd_clean, y_clean)[:4]) for t in THRESHOLDS])
+    ar_curve = scan["ar"].values
+    rv_curve = scan["revenue"].values
     fig6, ax6 = plt.subplots(figsize=(9, 4))
     ax6.plot(ar_curve * 100, rv_curve / 1e6, color="#4C72B0", linewidth=2)
     ax6.scatter([approval_rate * 100], [total_revenue / 1e6], color="#55A868", zorder=5, s=80,
@@ -371,13 +391,16 @@ with tab_main:
 
     # 9. ROC曲線
     st.header("9. ROC曲線")
-    fpr_arr, tpr_arr, roc_thr = roc_curve(y_clean, pd_clean)
-    roc_idx = np.argmin(np.abs(roc_thr - pd_threshold))
+    fpr_arr, tpr_arr, _ = roc_curve(y_clean, pd_clean)
+    # 現在閾値のFPR/TPRは混同行列から直接計算（roc_curve thresholdは降順+先頭∞のためズレが生じる）
+    n_pos = int(y_clean.sum()); n_neg = len(y_clean) - n_pos
+    current_fpr = fp / n_neg if n_neg > 0 else 0.0
+    current_tpr = tp / n_pos if n_pos > 0 else 0.0
     fig7, ax7 = plt.subplots(figsize=(6, 5))
     ax7.plot(fpr_arr, tpr_arr, color="#4C72B0", linewidth=2, label=f"ROC (AUC={auc:.4f})")
     ax7.plot([0, 1], [0, 1], "k--", linewidth=0.8, label="Random")
-    ax7.scatter([fpr_arr[roc_idx]], [tpr_arr[roc_idx]], color="#C44E52", zorder=5, s=100,
-                label=f"Threshold={pd_threshold:.3f}\nFPR={fpr_arr[roc_idx]:.3f}, TPR={tpr_arr[roc_idx]:.3f}")
+    ax7.scatter([current_fpr], [current_tpr], color="#C44E52", zorder=5, s=100,
+                label=f"Threshold={pd_threshold:.3f}\nFPR={current_fpr:.3f}, TPR={current_tpr:.3f}")
     ax7.set_title("ROC Curve"); ax7.set_xlabel("False Positive Rate"); ax7.set_ylabel("True Positive Rate")
     ax7.legend(fontsize=8); ax7.set_xlim(0, 1); ax7.set_ylim(0, 1)
     plt.tight_layout(); st.pyplot(fig7); plt.close()
@@ -414,8 +437,10 @@ with tab_main:
                            file_name="pd_summary.csv", mime="text/csv")
     with dl2:
         export_df = df.copy()
-        export_df["pd_annual"] = pd_use.values
-        export_df["approved"]  = (pd_use.values < pd_threshold).astype(int)
+        export_df["pd_annual"] = np.nan
+        export_df.loc[pd_use.index, "pd_annual"] = pd_use.values
+        export_df["approved"] = 0
+        export_df.loc[pd_use.index, "approved"] = (pd_use < pd_threshold).astype(int)
         st.download_button("件別スコアをCSVダウンロード",
                            export_df.to_csv(index=False, encoding="utf-8-sig"),
                            file_name="pd_detail.csv", mime="text/csv")
@@ -447,9 +472,9 @@ with tab_compare:
                           key="s2_ar") / 100.0
         s2_thr = float(np.percentile(pd_c, s2_ar * 100))
 
-    # シナリオ3: 最大利益（自動）
-    _revs3 = [calc_revenue(*calc_metrics(t, pd_c, y_c)[:4]) for t in THRESHOLDS]
-    s3_thr = float(THRESHOLDS[int(np.argmax(_revs3))])
+    # シナリオ3: 最大利益（自動）- キャッシュ済みscanを再利用
+    scan2 = scan_thresholds(pd_c, y_c, unit_tn, unit_fn, unit_tp, unit_fp)
+    s3_thr = float(scan2.loc[scan2["revenue"].idxmax(), "thr"])
 
     scenarios = {
         "① PD Threshold": s1_thr,
