@@ -27,27 +27,22 @@ st.title("PD 年率調整・閾値分析ツール")
 SAMPLE_PATH = "sample_data.csv"
 
 # ══════════════════════════════════════════════════════════════════════
-# サイドバー
+# データ読み込み（メインエリア）
 # ══════════════════════════════════════════════════════════════════════
-with st.sidebar:
-    st.header("データ読み込み")
-    uploaded = st.file_uploader("CSVファイルをアップロード")
+st.header("データ読み込み")
+uploaded_files = st.file_uploader("CSVファイルをアップロード", accept_multiple_files=True)
+uploaded = uploaded_files[0] if uploaded_files else None
 
-    if uploaded is not None:
-        df = pd.read_csv(uploaded)
-        data_key = uploaded.name
-        st.success(f"{len(df):,} 行読み込み完了")
-    else:
-        if os.path.exists(SAMPLE_PATH):
-            df = pd.read_csv(SAMPLE_PATH)
-            data_key = SAMPLE_PATH
-            st.info(f"サンプルデータを使用中（{len(df):,} 行）")
-
-    if uploaded is None and not os.path.exists(SAMPLE_PATH):
-        st.warning("CSVをアップロードしてください")
-
-if uploaded is None and not os.path.exists(SAMPLE_PATH):
-    st.info("左のサイドバーからCSVファイルをアップロードしてください。")
+if uploaded is not None:
+    df = pd.read_csv(uploaded)
+    data_key = uploaded.name
+    st.success(f"{len(df):,} 行読み込み完了")
+elif os.path.exists(SAMPLE_PATH):
+    df = pd.read_csv(SAMPLE_PATH)
+    data_key = SAMPLE_PATH
+    st.info(f"サンプルデータを使用中（{len(df):,} 行）")
+else:
+    st.warning("CSVをアップロードしてください")
     st.stop()
 
 # データソースが変わったらsession stateをリセット
