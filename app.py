@@ -31,7 +31,7 @@ SAMPLE_PATH = "sample_data.csv"
 # ══════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.header("データ読み込み")
-    uploaded = st.file_uploader("CSVファイルをアップロード", type="csv")
+    uploaded = st.file_uploader("CSVファイルをアップロード")
 
     if uploaded is not None:
         df = pd.read_csv(uploaded)
